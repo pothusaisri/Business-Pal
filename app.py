@@ -16,11 +16,52 @@ from langchain.chains import LLMChain
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, List, Optional, Dict, Any, Literal
 from dotenv import load_dotenv
+import chromadb
+from chromadb.utils import embedding_functions
+from datetime import datetime, timedelta
+import time
+import hashlib
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_deepseek import ChatDeepSeek
 
+try:
+    from langchain_community.vectorstores import FAISS
+    from langchain_openai import OpenAIEmbeddings
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    FAISS_AVAILABLE = True
+except ImportError:
+    st.warning("FAISS not installed. Please run: pip install faiss-cpu")
+    FAISS_AVAILABLE = False
 # Load environment variables
 load_dotenv()
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+
+
+def get_llm(model_name):
+    """Return appropriate LLM based on selected model name"""
+    if model_name.startswith("gpt"):
+        return ChatOpenAI(
+            model=model_name, 
+            temperature=0.3,
+            api_key=OPENAI_API_KEY
+        )
+    elif model_name == "gemini-1.5-flash":
+        return ChatGoogleGenerativeAI(
+            model="gemini-1.5-flash",
+            temperature=0.3,
+            google_api_key=GOOGLE_API_KEY
+        )
+    elif model_name == "deepseek-reasoner":
+        return ChatDeepSeek(model="deepseek-reasoner", 
+                            temperature=0.3,
+                            api_key=DEEPSEEK_API_KEY)
+    else:
+        # Fallback to GPT-4o
+        return ChatOpenAI(model="gpt-4o", temperature=0.3)
+
 
 # ======================== STATE MANAGEMENT ========================
 def init_session_state():
@@ -37,6 +78,12 @@ def init_session_state():
         "context_text": "",
         "selected_metrics": [],
         "show_supplier_form": False,
+        "chroma_collection": None,
+        "context_chunks": [],
+        "web_cache": {},
+        "context_set_time": None,
+        "context_set": False,
+        "prev_model": "gpt-4o"
     }
     
     for key, value in session_defaults.items():
@@ -54,9 +101,79 @@ def extract_text_from_file(uploaded_file):
             return "\n".join(page.get_text() for page in doc)
     return ""
 
-# === Web Search Tool ===
+#-======================== DB INITIALIZATION ========================
+def create_chroma_index(context_text):
+    """Create vector index from business context using ChromaDB"""
+    if not context_text or len(context_text) < 500:
+        return None, []
+    
+    # Initialize Chroma client
+    client = chromadb.Client()
+    
+    # Create unique collection name using hash of context and timestamp
+    unique_id = hashlib.md5((context_text + str(time.time())).encode()).hexdigest()[:8]
+    collection_name = f"business_context_{unique_id}"
+    
+    # Create collection with OpenAI embeddings
+    openai_ef = embedding_functions.OpenAIEmbeddingFunction(
+        api_key=OPENAI_API_KEY,
+        model_name="text-embedding-3-small"
+    )
+    
+    try:
+        collection = client.create_collection(
+            name=collection_name,
+            embedding_function=openai_ef
+        )
+    except chromadb.errors.InternalError:
+        # Handle rare case of hash collision by adding timestamp
+        unique_id = hashlib.md5((context_text + str(time.time())).encode()).hexdigest()[:12]
+        collection_name = f"business_context_{unique_id}"
+        collection = client.create_collection(
+            name=collection_name,
+            embedding_function=openai_ef
+        )
+    
+    # Split text into chunks
+    chunk_size = 1000
+    chunks = [context_text[i:i+chunk_size] for i in range(0, len(context_text), chunk_size)]
+    ids = [f"chunk_{i}" for i in range(len(chunks))]
+    
+    # Add to collection
+    collection.add(
+        documents=chunks,
+        ids=ids
+    )
+    
+    return collection, chunks
+
+def retrieve_relevant_context(query, k=3):
+    """Retrieve top k relevant context chunks"""
+    if not st.session_state.chroma_collection:
+        return st.session_state.business_context[:3000]
+    
+    try:
+        results = st.session_state.chroma_collection.query(
+            query_texts=[query],
+            n_results=k
+        )
+        return "\n\n".join(results['documents'][0])
+    except Exception as e:
+        st.error(f"Context retrieval error: {str(e)}")
+        return st.session_state.business_context[:3000]
+
+# === Web Search with Caching ===
 def search_web(query: str) -> str:
     """Uses SerpAPI to search for latest web trends."""
+    # Cache management
+    cache_key = f"{query[:100]}"
+    cached = st.session_state.web_cache.get(cache_key)
+    
+    # Return cached result if exists and not expired
+    if cached and datetime.now() - cached["timestamp"] < timedelta(hours=1):
+        return cached["results"]
+    
+    # Perform fresh search
     params = {
         "q": query,
         "api_key": SERPAPI_API_KEY,
@@ -73,20 +190,36 @@ def search_web(query: str) -> str:
         snippet = item.get("snippet", "No description available")
         web_context.append(f"### {title}\n**Source**: [{link}]({link})\n{snippet}\n")
     
-    results = "\n".join([r.get("title", "") + ": " + r.get("link", "") for r in results.get("organic_results", [])])
-    print(f"Web search results: {results}")
-    return results.join(web_context)
+    web_content = "\n".join(web_context)
+    
+    # Update cache (limit to 50 entries)
+    if len(st.session_state.web_cache) > 50:
+        # Remove oldest entry
+        oldest_key = min(st.session_state.web_cache, key=lambda k: st.session_state.web_cache[k]["timestamp"])
+        del st.session_state.web_cache[oldest_key]
+    
+    st.session_state.web_cache[cache_key] = {
+        "results": web_content,
+        "timestamp": datetime.now()
+    }
+    
+    return web_content
 
 
 
 # ======================== AGENT DEFINITIONS ========================
 class BaseAgent:
     def __init__(self, model_name="gpt-4o"):
-        self.llm = ChatOpenAI(model=model_name, temperature=0.3)
+        self.llm = get_llm(model_name)
+        
     def get_web_context(self, query, business_context):
         """Get web context relevant to both query and business context"""
         search_query = f"{query} in context of {business_context[:100]}"
         return search_web(search_query)
+    
+    def get_business_context(self, query):
+        """Get relevant business context chunks"""
+        return retrieve_relevant_context(query)
 
 class SupplierAgent(BaseAgent):
     def search_suppliers(self, query, specifications, locations, exclude, notes, context):
@@ -188,7 +321,8 @@ class SupplierAgent(BaseAgent):
 class NewsletterAgent(BaseAgent):
     def generate_copy(self, query, context):
         """Generate marketing email/newsletter from user prompt"""
-        web_context = self.get_web_context(f"email marketing trends for {query}", context)
+        business_context = self.get_business_context(query)
+        web_context = self.get_web_context(f"email marketing trends for {query}", business_context)
  
         prompt = ChatPromptTemplate.from_template(
             """You are MarketingCopyAgent. Based on this user request:
@@ -218,7 +352,7 @@ class NewsletterAgent(BaseAgent):
             [well formatted email body here]
             """
         )
- 
+        
         chain = prompt | self.llm | StrOutputParser()
         return chain.invoke({"query": query, "context": context, "web_context": web_context})
 
@@ -226,7 +360,8 @@ class NewsletterAgent(BaseAgent):
 class PricingAgent(BaseAgent):
     def analyze_pricing(self, query, context):
         """Comprehensive pricing strategy analysis"""
-        web_context = self.get_web_context(f"pricing strategies for {query}", context)
+        business_context = self.get_business_context(query)
+        web_context = self.get_web_context(f"pricing strategies for {query}", business_context)
 
         prompt = ChatPromptTemplate.from_template(
             """
@@ -239,7 +374,6 @@ class PricingAgent(BaseAgent):
             "{context}" and using Market Context from Web {web_context}
             - **Risk Mitigation**: [strategies]"""
         )
-        
         chain = prompt | self.llm | StrOutputParser()
         return chain.invoke({"query": query, "context": context, "web_context": web_context})
     
@@ -247,7 +381,8 @@ class CompetitorAgent(BaseAgent):
     def analyze_competitors(self, query, context):
         """Analyze competitors and whitespace opportunities"""
         # Get relevant web context
-        web_context = self.get_web_context(f"competitors for {query}", context)
+        focused_context = self.get_business_context(query)
+        web_context = self.get_web_context(f"competitors for {query}", focused_context)
         
         prompt = ChatPromptTemplate.from_template(
             """
@@ -288,7 +423,9 @@ class TrendAgent(BaseAgent):
     def analyze_trends(self, query, context):
         """Market trend analysis with forecasting"""
 
-        web_context = self.get_web_context(f"market trends for {query}", context)
+        focused_context = self.get_business_context(query)
+        web_context = self.get_web_context(f"market trends for {query}", focused_context)
+
         prompt = ChatPromptTemplate.from_template(
             """As a market analyst, identify key trends for:
             Industry: {query}
@@ -319,6 +456,7 @@ class GeneralAgent(BaseAgent):
     def answer_question(self, query, business_context):
         """Handle general business questions with web and business context"""
         # Get relevant web context
+        business_context = self.get_business_context(query)
         web_context = self.get_web_context(query, business_context)
         
         prompt = ChatPromptTemplate.from_template(
@@ -333,9 +471,7 @@ class GeneralAgent(BaseAgent):
 
             ### User Question
             {query}
-
-            Provide a comprehensive response in markdown format:
-            1. **Key Insights**: [Concise summary of most relevant points from business context and web]"""
+            If the question is not clear or irrelevant then respond generally the llm answer the question in a way that is helpful to the user."""
         )
         
         chain = prompt | self.llm | StrOutputParser()
@@ -387,7 +523,7 @@ def create_supervisor_workflow():
         Respond ONLY with the category name.
         """
         
-        llm = ChatOpenAI(model=st.session_state.model_name, temperature=0)
+        llm = get_llm(st.session_state.model_name)
         response = llm.invoke([
             SystemMessage(content="You are a business intelligence routing specialist"),
             HumanMessage(content=prompt)
@@ -467,8 +603,11 @@ def create_business_metrics_workflow():
     """)
     
     # Create chain
+    llm = get_llm(st.session_state.model_name)
+    
+    # Create chain
     trend_chain = LLMChain(
-        llm=ChatOpenAI(model=st.session_state.model_name, temperature=0.3),
+        llm=llm,
         prompt=trend_prompt
     )
     
@@ -573,11 +712,26 @@ def render_sidebar():
     st.sidebar.title("⚙️ Configuration")
     
     # Model selection
-    st.session_state.model_name = st.sidebar.selectbox(
+    prev_model = st.session_state.model_name
+    model_name = st.sidebar.selectbox(
         "AI Model", 
-        ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
-        index=0
+        [
+            "gpt-4o", 
+            "gpt-4-turbo", 
+            "gpt-3.5-turbo", 
+            "gemini-1.5-flash", 
+            "deepseek-reasoner"
+        ],
+        index=0,
+        key="model_selector",  # Important: use a dedicated key
+        help="Select AI model to use for analysis"
     )
+
+    if model_name != st.session_state.prev_model:
+        st.session_state.prev_model = model_name
+        st.session_state.model_name = model_name
+        st.sidebar.success(f"Model changed to {model_name}")
+        st.rerun()
     
     # Business Context Section
     st.sidebar.subheader("Business Context")
@@ -640,8 +794,8 @@ def render_sidebar():
             extracted_text = extract_text_from_file(context_file)
             if len(extracted_text) > 200:
                 st.session_state.context_text = extracted_text
-                st.session_state.business_context = extracted_text[:3000]  # Store first 3000 chars
-                st.sidebar.success("Business context extracted!")
+                st.session_state.context_file = context_file
+                st.sidebar.success("✅ Document processed! Click 'Set Context' to index it")
             else:
                 st.sidebar.warning("Document too short (min 200 characters)")
         except Exception as e:
@@ -656,11 +810,33 @@ def render_sidebar():
         help="Minimum 200 characters"
     )
     
+    # Update context text if user types in the text area
+    if manual_context != st.session_state.context_text:
+        st.session_state.context_text = manual_context
+        st.session_state.context_file = None
+    
+    # Show context status
+    if st.session_state.context_set:
+        st.sidebar.success("✅ Business context is set and indexed")
+    else:
+        st.sidebar.warning("ℹ️ Business context not set")
+    
+    # Set context button
     if st.sidebar.button("💼 Set Context", key="set_context", use_container_width=True):
-        if len(manual_context) >= 200:
-            st.session_state.business_context = manual_context
-            st.session_state.context_text = manual_context
-            st.sidebar.success("Business context set!")
+        if len(st.session_state.context_text) >= 200:
+            try:
+                # Create Chroma index
+                with st.spinner("Indexing business context..."):
+                    chroma_collection, chunks = create_chroma_index(st.session_state.context_text)
+                    st.session_state.chroma_collection = chroma_collection
+                    st.session_state.context_chunks = chunks
+                    st.session_state.business_context = st.session_state.context_text
+                    st.session_state.context_set = True
+                    st.session_state.context_set_time = datetime.now()
+                st.sidebar.success("✅ Business context set and indexed!")
+                st.rerun()  # Force UI refresh to update status
+            except Exception as e:
+                st.sidebar.error(f"Error indexing context: {str(e)}")
         else:
             st.sidebar.error("Please provide at least 200 characters")
     
@@ -668,6 +844,11 @@ def render_sidebar():
     if st.sidebar.button("🔄 Clear Context", use_container_width=True):
         st.session_state.business_context = ""
         st.session_state.context_text = ""
+        st.session_state.context_file = None
+        st.session_state.chroma_collection = None
+        st.session_state.context_chunks = []
+        st.session_state.context_set_time = None
+        st.session_state.context_set = False
         st.sidebar.info("Context cleared")
     
     st.sidebar.markdown("---")
@@ -756,7 +937,7 @@ def render_sidebar():
     if data_file:
         try:
             st.session_state.business_data = pd.read_csv(data_file)
-            st.sidebar.success("Data uploaded!")
+            st.sidebar.success("✅ Data uploaded!")
             
             # Auto-select metrics
             if "Date" in st.session_state.business_data.columns:
@@ -910,17 +1091,25 @@ def render_chat():
             if msg.get("agent_type") == "business_metrics" and msg.get("data"):
                 render_business_metrics_results(msg["data"], i)
             
-            # Display supplier results - expander doesn't need a key
+            # Display supplier results
             if "suppliers" in msg:
                 st.subheader(f"🔍 Found {len(msg['suppliers'])} Suppliers")
                 for j, supplier in enumerate(msg["suppliers"]):
-                    # Remove key parameter from expander
                     with st.expander(f"{j+1}. {supplier['name']}"):
                         st.markdown(f"**Website**: [{supplier['website']}]({supplier['website']})")
                         st.caption(supplier["description"])
     
     # User input
     if prompt := st.chat_input("Ask about your business..."):
+        # Check if business context is set
+        if not st.session_state.business_context:
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "🚫 **Action Required**\n\nPlease set your business context in the sidebar to enable AI assistance."
+            })
+            st.rerun()
+        
         # Add user message
         st.session_state.messages.append({"role": "user", "content": prompt})
         st.session_state.query = prompt
@@ -951,6 +1140,7 @@ def render_chat():
                     "role": "assistant",
                     "content": "🔍 Please Scroll to the top of the page and provide specifications and locations for supplier search"
                 })
+                st.session_state.show_supplier_form = True
             else:
                 st.rerun()  # Will trigger supplier form render
         elif "business_metrics" in result["agent_type"]:
@@ -1018,9 +1208,19 @@ def render_chat():
             with st.spinner("Analyzing..."):
                 handle_agent_response(prompt, result["agent_type"])
         st.rerun()
+# ======================== AGENT RESPONSE HANDLER ========================
 
 def handle_agent_response(prompt, agent_type):
     """Process user query with appropriate agent"""
+    # Check business context exists (should already be checked, but adding for safety)
+    if not st.session_state.business_context:
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": "❌ Business context not set - please configure in sidebar"
+        })
+        return
+        
+    # Route to appropriate agent
     if agent_type == "pricing":
         agent = PricingAgent(st.session_state.model_name)
         response = agent.analyze_pricing(prompt, st.session_state.business_context)
@@ -1104,11 +1304,17 @@ def handle_agent_response(prompt, agent_type):
         response = agent.answer_question(prompt, st.session_state.business_context)
         st.session_state.messages.append({
             "role": "assistant",
-            "content": f"## 💡 Business Advisor\n{response}"
+            "content": response
         })
 
 def handle_supplier_request():
     """Process supplier search request"""
+    if not st.session_state.business_context:
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": "❌ Business context not set - please configure in sidebar"
+        })
+        return
     with st.spinner("Searching global suppliers..."):
         agent = SupplierAgent(st.session_state.model_name)
         suppliers = agent.search_suppliers(
@@ -1150,21 +1356,31 @@ def main():
     
     with col1:
         # Show context status
-        if st.session_state.business_context:
-            st.info(f"**Business Context:** {st.session_state.business_context[:300]}...")
+        if st.session_state.get("context_set"):
+            st.success(f"✅ Business context is set: {st.session_state.business_context[:300]}...")
         else:
-            st.warning("Please set your business context in the sidebar")
+            st.error("🚨 **Action Required** - Please set your business context in the sidebar to enable AI assistance")
             
+        model_name = st.session_state.get("model_name")
+        if model_name == "gemini-1.5-flash":
+            st.info("ℹ️ Using Google Gemini Pro model")
+        elif model_name == "deepseek-reasoner":
+            st.info("ℹ️ Using DeepSeek Chat model")
+        else:
+            st.info(f"ℹ️ Using OpenAI {model_name} model")
         # Metrics selection if data is available
         if st.session_state.business_data is not None:
             render_metrics_selection()
             
-        # FIXED: Use the dedicated flag to show supplier form
+        # Show supplier form if requested
         if st.session_state.show_supplier_form:
             if render_supplier_form():
-                handle_supplier_request()
-                st.session_state.show_supplier_form = False
-                st.rerun()
+                if not st.session_state.business_context:
+                    st.error("❌ Please set business context before searching for suppliers")
+                else:
+                    handle_supplier_request()
+                    st.session_state.show_supplier_form = False
+                    st.rerun()
         
         # Show chat interface
         render_chat()
