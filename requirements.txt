@@ -1,23 +1,25 @@
-streamlit
-langchain_core
 langchain_community
 langchain_ollama
 pdfplumber
-langgraph
-openai
-serpapi
-google-search-results
-python-dotenv
-langchain_openai
-matplotlib
-PyPDF2
-pymupdf
-tabulate
-plotly
-chromadb
 langchain-text-splitters==0.0.1
 langchain_google_genai
 langchain_deepseek
+PyPDF2
+tabulate
+matplotlib
+streamlit
+langchain_core
+langchain_openai
+langgraph
+pymupdf  # provides fitz
+serpapi
+google-search-results
+python-dotenv
+chromadb
+pandas
+numpy
+plotly
+
 # conda create -n market_research_bot python=3.10 -y
 # conda activate market_research_bot
 # pip install -r requirements.txt
