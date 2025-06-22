@@ -7,7 +7,7 @@ import re
 import os
 import fitz  # PyMuPDF
 from io import StringIO
-from serpapi import GoogleSearch
+from serpapi.google_search import GoogleSearch
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
