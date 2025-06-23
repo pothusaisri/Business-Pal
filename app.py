@@ -325,7 +325,7 @@ class NewsletterAgent(BaseAgent):
         web_context = self.get_web_context(f"email marketing trends for {query}", business_context)
  
         prompt = ChatPromptTemplate.from_template(
-            """You are MarketingCopyAgent. Based on this user request:
+            """You are Marketing email/newsletter Agent. Based on this user request:
  
             "{query}"
  
@@ -1255,7 +1255,7 @@ def handle_agent_response(prompt, agent_type):
         response = agent.generate_copy(prompt, st.session_state.business_context)
         st.session_state.messages.append({
             "role": "assistant",
-            "content": f"## ✉️ Marketing Copy\n{response}"
+            "content": f"{response}"
         })
         
     elif agent_type == "business_metrics":
