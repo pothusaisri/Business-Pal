@@ -751,6 +751,7 @@ def render_sidebar():
         - Target customers  
         - Competitive advantages  
         - Business goals  
+        - Locations
         """, unsafe_allow_html=True)
         
         industry = st.selectbox("Quick Samples", 
@@ -763,7 +764,8 @@ def render_sidebar():
         Products: Organic cotton apparel
         Target: Eco-conscious millennials
         Goals: 30% YOY growth, EU expansion
-        Advantage: Carbon-neutral shipping""", language="text")
+        Advantage: Carbon-neutral shipping
+        Location: USA, GERMANY""", language="text")
         
         elif industry == "SaaS":
             st.code("""FlowStack Technologies
@@ -771,7 +773,8 @@ def render_sidebar():
         Product: AI productivity platform
         Target: Tech teams (50-500 employees)
         Pricing: $15/user/month
-        Goal: 10K MAU by EOY""", language="text")
+        Goal: 10K MAU by EOY
+        Location: Europe, USA""", language="text")
             
         elif industry == "Coffee":
             st.code("""Mountain Peak Coffee
@@ -779,7 +782,8 @@ def render_sidebar():
         Products: Single-origin beans
         Target: Urban professionals
         Advantage: Direct trade farmers
-        Goal: 40% subscription growth""", language="text")
+        Goal: 40% subscription growth
+        Location: UK, Germany, USA""", language="text")
             
         elif industry == "Restaurant":
             st.code("""Urban Bistro
@@ -787,7 +791,8 @@ def render_sidebar():
         Cuisine: Farm-to-table
         Target: Foodies (25-45)
         Advantage: Locally sourced ingredients
-        Goal: Expand catering by 25%""", language="text")
+        Goal: Expand catering by 25%
+        Location: India, USA, UK""", language="text")
     
     if context_file:
         try:
