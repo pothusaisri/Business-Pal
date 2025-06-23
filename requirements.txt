@@ -14,6 +14,7 @@ langchain-deepseek
 protobuf==3.20.*
 pinecone-client
 langchain-pinecone
+langchain_community
 
 # conda create -n market_research_bot python=3.10 -y
 # conda activate market_research_bot
