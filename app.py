@@ -17,7 +17,7 @@ from langgraph.graph import StateGraph, END
 from typing import TypedDict, List, Optional, Dict, Any, Literal
 from dotenv import load_dotenv
 import pinecone
-from langchain.vectorstores import Pinecone
+from langchain_community.vectorstores import Pinecone
 from pinecone import Pinecone, ServerlessSpec
 from langchain_pinecone import PineconeVectorStore
 from datetime import datetime, timedelta
