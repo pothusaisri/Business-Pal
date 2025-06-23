@@ -1247,7 +1247,7 @@ def handle_agent_response(prompt, agent_type):
         response = agent.analyze_competitors(prompt, st.session_state.business_context)
         st.session_state.messages.append({
             "role": "assistant",
-            "content": f"## 🏆 Competitor & Whitespace Analysis\n{response}"
+            "content": f"{response}"
         })
 
     elif agent_type == "newsletter":
