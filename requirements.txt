@@ -1,24 +1,19 @@
-langchain_community
-langchain_ollama
-pdfplumber
-langchain-text-splitters==0.0.1
-langchain_google_genai
-langchain_deepseek
-PyPDF2
-tabulate
-matplotlib
 streamlit
-langchain_core
-langchain_openai
-langgraph
-pymupdf  # provides fitz
-serpapi
-google-search-results
-python-dotenv
-chromadb
 pandas
 numpy
 plotly
+PyMuPDF
+python-dotenv
+google-search-results
+langchain
+langchain-openai
+langchain-core
+langgraph
+langchain-google-genai
+langchain-deepseek
+protobuf==3.20.*
+pinecone-client
+langchain-pinecone
 
 # conda create -n market_research_bot python=3.10 -y
 # conda activate market_research_bot

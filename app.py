@@ -16,8 +16,10 @@ from langchain.chains import LLMChain
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, List, Optional, Dict, Any, Literal
 from dotenv import load_dotenv
-import chromadb
-from chromadb.utils import embedding_functions
+import pinecone
+from langchain.vectorstores import Pinecone
+from pinecone import Pinecone, ServerlessSpec
+from langchain_pinecone import PineconeVectorStore
 from datetime import datetime, timedelta
 import time
 import hashlib
@@ -38,6 +40,9 @@ SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")  
+
+pc = Pinecone(api_key= PINECONE_API_KEY)
 
 
 def get_llm(model_name):
@@ -78,7 +83,8 @@ def init_session_state():
         "context_text": "",
         "selected_metrics": [],
         "show_supplier_form": False,
-        "chroma_collection": None,
+        "pinecone_index": None,  # Replace chroma_collection
+        "context_namespace": None,
         "context_chunks": [],
         "web_cache": {},
         "context_set_time": None,
@@ -102,62 +108,56 @@ def extract_text_from_file(uploaded_file):
     return ""
 
 #-======================== DB INITIALIZATION ========================
-def create_chroma_index(context_text):
-    """Create vector index from business context using ChromaDB"""
+def create_pinecone_index(context_text):
+    """Create vector index from business context using Pinecone"""
     if not context_text or len(context_text) < 500:
-        return None, []
+        return None, None
     
-    # Initialize Chroma client
-    client = chromadb.Client()
+    namespace = hashlib.md5(context_text.encode()).hexdigest()
+
+    embeddings = OpenAIEmbeddings(
+        model="text-embedding-ada-002",  # outputs 1536-dim vectors
+        api_key=OPENAI_API_KEY
+    )
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200
+    )
+    chunks = text_splitter.split_text(context_text)
+
+    index_name = "business-context"
     
-    # Create unique collection name using hash of context and timestamp
-    unique_id = hashlib.md5((context_text + str(time.time())).encode()).hexdigest()[:8]
-    collection_name = f"business_context_{unique_id}"
-    
-    # Create collection with OpenAI embeddings
-    openai_ef = embedding_functions.OpenAIEmbeddingFunction(
-        api_key=OPENAI_API_KEY,
-        model_name="text-embedding-3-small"
+    # 🔥 Force-delete if existing index has wrong dimension
+    if index_name in pc.list_indexes().names():
+        pc.delete_index(index_name)
+        time.sleep(5)  # Wait a few seconds to avoid race conditions
+
+    pc.create_index(
+        name=index_name,
+        dimension=1536,  # ✅ Must match embedding model
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+    )
+
+    vector_store = PineconeVectorStore.from_texts(
+        chunks,
+        embeddings,
+        index_name=index_name,
+        namespace=namespace
     )
     
-    try:
-        collection = client.create_collection(
-            name=collection_name,
-            embedding_function=openai_ef
-        )
-    except chromadb.errors.InternalError:
-        # Handle rare case of hash collision by adding timestamp
-        unique_id = hashlib.md5((context_text + str(time.time())).encode()).hexdigest()[:12]
-        collection_name = f"business_context_{unique_id}"
-        collection = client.create_collection(
-            name=collection_name,
-            embedding_function=openai_ef
-        )
-    
-    # Split text into chunks
-    chunk_size = 1000
-    chunks = [context_text[i:i+chunk_size] for i in range(0, len(context_text), chunk_size)]
-    ids = [f"chunk_{i}" for i in range(len(chunks))]
-    
-    # Add to collection
-    collection.add(
-        documents=chunks,
-        ids=ids
-    )
-    
-    return collection, chunks
+    return vector_store, namespace
 
 def retrieve_relevant_context(query, k=3):
-    """Retrieve top k relevant context chunks"""
-    if not st.session_state.chroma_collection:
+    """Retrieve top k relevant context chunks using Pinecone"""
+    if not st.session_state.pinecone_index:
         return st.session_state.business_context[:3000]
     
     try:
-        results = st.session_state.chroma_collection.query(
-            query_texts=[query],
-            n_results=k
-        )
-        return "\n\n".join(results['documents'][0])
+        # Use the vector store to do similarity search
+        results = st.session_state.pinecone_index.similarity_search(query, k=k)
+        return "\n\n".join([doc.page_content for doc in results])
     except Exception as e:
         st.error(f"Context retrieval error: {str(e)}")
         return st.session_state.business_context[:3000]
@@ -825,16 +825,16 @@ def render_sidebar():
     if st.sidebar.button("💼 Set Context", key="set_context", use_container_width=True):
         if len(st.session_state.context_text) >= 200:
             try:
-                # Create Chroma index
+                # Create Pinecone index
                 with st.spinner("Indexing business context..."):
-                    chroma_collection, chunks = create_chroma_index(st.session_state.context_text)
-                    st.session_state.chroma_collection = chroma_collection
-                    st.session_state.context_chunks = chunks
+                    vector_store, namespace = create_pinecone_index(st.session_state.context_text)
+                    st.session_state.pinecone_index = vector_store
+                    st.session_state.context_namespace = namespace
                     st.session_state.business_context = st.session_state.context_text
                     st.session_state.context_set = True
                     st.session_state.context_set_time = datetime.now()
                 st.sidebar.success("✅ Business context set and indexed!")
-                st.rerun()  # Force UI refresh to update status
+                st.rerun()
             except Exception as e:
                 st.sidebar.error(f"Error indexing context: {str(e)}")
         else:
@@ -845,10 +845,10 @@ def render_sidebar():
         st.session_state.business_context = ""
         st.session_state.context_text = ""
         st.session_state.context_file = None
-        st.session_state.chroma_collection = None
-        st.session_state.context_chunks = []
-        st.session_state.context_set_time = None
+        st.session_state.pinecone_index = None
+        st.session_state.context_namespace = None
         st.session_state.context_set = False
+        st.session_state.context_set_time = None
         st.sidebar.info("Context cleared")
     
     st.sidebar.markdown("---")
