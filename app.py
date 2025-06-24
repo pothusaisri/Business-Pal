@@ -635,13 +635,46 @@ def create_business_metrics_workflow():
                 state['error'] = "Data must contain a 'Date' column"
                 return state
             
+            # Get numeric columns
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            if not numeric_cols:
+                state['error'] = "No numeric metrics found in the data"
+                return state
+            
+            # Use LLM to select the most appropriate metrics for trend analysis
+            llm = get_llm(st.session_state.model_name)
+             prompt = f"""
+            You are a business intelligence analyst. Given a dataset with the following numeric columns:
+            {', '.join(numeric_cols)}
+            
+            And the user's question: "{state['topic']}"
+            
+            Select the 2-5 most appropriate metrics for trend analysis visualization (line charts) 
+            that would provide the most valuable insights for this query. Consider:
+            - Business relevance to the query
+            - Suitability for trend visualization
+            - Potential to show meaningful patterns over time
+            
+            Return ONLY a comma-separated list of the selected metric names.
+            Example: Revenue,Active Users,Conversion Rate
+            """
+            
+            response = llm.invoke([
+                SystemMessage(content="You are a data visualization expert"),
+                HumanMessage(content=prompt)
+            ])
+            
+            # Parse the LLM response
+            selected_metrics = [m.strip() for m in response.content.split(",")]
+            selected_metrics = [m for m in selected_metrics if m in numeric_cols]
+            
+            # Fallback if LLM selection fails
+            if not selected_metrics:
+                selected_metrics = numeric_cols[:min(3, len(numeric_cols))]
+            
             # Generate charts
             charts = {}
-            print("reached for chart 1")
-            for metric in st.session_state.selected_metrics:
-                if metric not in df.columns:
-                    continue
-                    
+            for metric in selected_metrics:
                 fig = px.line(
                     df, 
                     x="Date", 
@@ -661,11 +694,7 @@ def create_business_metrics_workflow():
             
             # Calculate key metrics
             key_metrics = {}
-            for metric in st.session_state.selected_metrics:
-                print("reached for chart 2")
-                if metric not in df.columns:
-                    continue
-                    
+            for metric in selected_metrics:
                 # Convert to numeric if needed
                 if not np.issubdtype(df[metric].dtype, np.number):
                     df[metric] = pd.to_numeric(df[metric], errors='coerce')
@@ -685,7 +714,6 @@ def create_business_metrics_workflow():
                     "delta": delta,
                     "growth": growth
                 }
-            print("reached for chart 3")
             
             state['charts'] = charts
             state['key_metrics'] = key_metrics
@@ -943,18 +971,13 @@ def render_sidebar():
         try:
             st.session_state.business_data = pd.read_csv(data_file)
             st.sidebar.success("✅ Data uploaded!")
-            
-            # Auto-select metrics
-            if "Date" in st.session_state.business_data.columns:
-                numeric_cols = st.session_state.business_data.select_dtypes(include=[np.number]).columns.tolist()
-                st.session_state.selected_metrics = numeric_cols[:2]  # Select first 2 metrics by default
         except Exception as e:
             st.sidebar.error(f"Error: {str(e)}")
-    
+
     if st.sidebar.button("🗑️ Clear Data", use_container_width=True):
         st.session_state.business_data = None
         st.sidebar.info("Data cleared")
-    
+
     st.sidebar.markdown("---")
     
     # Agent documentation
