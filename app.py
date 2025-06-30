@@ -507,9 +507,7 @@ def create_supervisor_workflow():
     workflow = StateGraph(SupervisorState)
     
     def classify_intent(state: SupervisorState):
-        prompt = f"""
-        Classify this business query into exactly one category:
-        {state['query']}
+        prompt = f"""Classify this business query into exactly one category: {state['query']}
         
         Categories:
         - supplier: Sourcing vendors, manufacturers, supply chain partners
@@ -643,7 +641,7 @@ def create_business_metrics_workflow():
             
             # Use LLM to select the most appropriate metrics for trend analysis
             llm = get_llm(st.session_state.model_name)
-             prompt = f"""
+            prompt = f"""
             You are a business intelligence analyst. Given a dataset with the following numeric columns:
             {', '.join(numeric_cols)}
             
