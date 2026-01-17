@@ -12,7 +12,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain.chains import LLMChain
+from langchain_classic.chains import LLMChain
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, List, Optional, Dict, Any, Literal
 from dotenv import load_dotenv
